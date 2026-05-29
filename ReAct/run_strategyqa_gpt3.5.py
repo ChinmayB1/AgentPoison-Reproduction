@@ -19,6 +19,7 @@ parser.add_argument("--task_type", "-t", type=str, default="benign", help="choos
 parser.add_argument("--backbone", "-b", type=str, default="gpt", help="choose from [gpt, llama3]")
 parser.add_argument("--save_dir", "-s", type=str, default="./result/ReAct")
 parser.add_argument("--knn", "-k", type=int, default=1, help="choose from [1, 3, 5, 7, 9]")
+parser.add_argument("--trigger_path", type=str, default=None, help="Path to the optimized trigger JSON file")
 args = parser.parse_args()
 
 openai.api_key = "sk-xxx"
@@ -61,35 +62,51 @@ def llama3(prompt, stop=["\n"], return_probs=False):
 
     terminators = [
         tokenizer.eos_token_id,
-        tokenizer.convert_tokens_to_ids("<|eot_id|>")
     ]
+    for extra_eos in ["<|eot_id|>", "<|im_end|>"]:
+        tok_id = tokenizer.convert_tokens_to_ids(extra_eos)
+        if tok_id is not None:
+            terminators.append(tok_id)
 
     with torch.no_grad():
-        generation_output = model.generate(
-        input_ids,
-        max_new_tokens=256,
-        eos_token_id=terminators,
-        do_sample=True,
-        temperature=0.6,
-        top_p=0.9,
-    )
+        if return_probs:
+            generation_output = model.generate(
+                input_ids,
+                max_new_tokens=256,
+                eos_token_id=terminators,
+                do_sample=True,
+                temperature=0.6,
+                top_p=0.9,
+                return_dict_in_generate=True,
+                output_scores=True,
+            )
+            input_length = input_ids.shape[1]
+            generated_tokens = generation_output.sequences[:, input_length:]
+            output = tokenizer.decode(generated_tokens[0], skip_special_tokens=True)
 
-    input_length = input_ids.shape[1]
-    generated_tokens = generation_output.sequences[:, input_length:]
-    output = tokenizer.decode(generated_tokens[0])
+            transition_scores = model.compute_transition_scores(
+                generation_output.sequences, generation_output.scores, normalize_logits=True
+            )
+            prob_dicts = []
+            for tok, score in zip(generated_tokens[0], transition_scores[0]):
+                prob_dicts.append({tokenizer.decode(tok):score.cpu().tolist()})
 
-    if return_probs:
-        transition_scores = model.compute_transition_scores(
-            generation_output.sequences, generation_output.scores, normalize_logits=True
-        )
-        prob_dicts = []
-        for tok, score in zip(generated_tokens[0], transition_scores[0]):
-            prob_dicts.append({tokenizer.decode(tok):score.cpu().tolist()})
+            # Return dict matching gpt() interface: result["text"], result["logprobs"]
+            return {"text": output, "logprobs": prob_dicts}
+        else:
+            generation_output = model.generate(
+                input_ids,
+                max_new_tokens=256,
+                eos_token_id=terminators,
+                do_sample=True,
+                temperature=0.6,
+                top_p=0.9,
+            )
+            input_length = input_ids.shape[1]
+            generated_tokens = generation_output[:, input_length:]
+            output = tokenizer.decode(generated_tokens[0], skip_special_tokens=True)
 
-        return output, prob_dicts
-
-    else:
-        return output
+            return output
 
 
 if args.backbone == "gpt": 
@@ -98,12 +115,12 @@ if args.backbone == "gpt":
 else:
     save_file_name = f"{save_dir}/{embedder}-{algo}-{task_type}.jsonl" # saved file name
 
-    model_id = "meta-llama/Meta-Llama-3-8B-Instruct"
+    model_id = "Qwen/Qwen2.5-7B-Instruct"
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        # torch_dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16,
         device_map="auto",
     )
     llm = llama3
@@ -111,6 +128,16 @@ else:
 
 ##### Put your trigger tokens here #####
 trigger_token_list = ['put', 'your', 'trigger', 'tokens', 'in', 'this', 'list']
+
+if args.trigger_path and os.path.exists(args.trigger_path):
+    try:
+        with open(args.trigger_path, "r") as f_trig:
+            trig_data = json.load(f_trig)
+        trigger_token_list = trig_data.get("clean_tokens", trig_data.get("trigger_tokens", trigger_token_list))
+        print("Loaded trigger tokens from file:", args.trigger_path)
+    except Exception as e:
+        print("Error loading trigger path:", e)
+
 print("trigger_token_list", trigger_token_list)
 
 trigger_token_list = [token for token in trigger_token_list if token not in ['[CLS]', '[MASK]', '[SEP]']]
@@ -244,9 +271,20 @@ num_tool_calls = 0
 num_backoff = 0
 num_ask_human = 0
 
+start_idx = 0
+if os.path.exists(save_file_name):
+    try:
+        with open(save_file_name, "r") as f_in:
+            existing_lines = f_in.readlines()
+        start_idx = len([line for line in existing_lines if line.strip()])
+        print(f"Resuming StrategyQA evaluation from question index {start_idx} (loaded {start_idx} existing results)")
+    except Exception as e:
+        print(f"Error reading existing results: {e}")
+
 with open(save_file_name,"a") as output_file:
     for i in tqdm(range(len(env))):
-    #   try:
+        if i < start_idx:
+            continue
         if i >= 25: #or i < 36:
             continue
         question = env.reset(idx=i)

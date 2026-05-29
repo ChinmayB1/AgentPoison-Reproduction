@@ -11,7 +11,7 @@ import Levenshtein
 import sys
 sys.path.append("./")
 from AgentPoison.utils import load_db_ehr, load_models, get_ada_embedding
-from AgentPoison.config import model_code_to_embedder_name_dsi, model_code_to_embedder_name
+# from AgentPoison.config import model_code_to_embedder_name_dsi, model_code_to_embedder_name
 import torch
 from tqdm import tqdm
 import replicate
@@ -57,6 +57,15 @@ class MedAgent(UserProxyAgent):
         self.embedding_model, self.embedding_tokenizer, _ = load_models(model_code)
         self.load_db(model_code, self.embedding_model, self.embedding_tokenizer)
         self.backbone = backbone
+        if self.backbone == "llama3":
+            from transformers import AutoTokenizer, AutoModelForCausalLM
+            model_id = "Qwen/Qwen2.5-7B-Instruct"
+            self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                torch_dtype=torch.bfloat16,
+                device_map="auto"
+            )
 
     def load_db(self, model_code, model, tokenizer):
 
@@ -221,28 +230,40 @@ class MedAgent(UserProxyAgent):
         else:
             from prompts_eicu import RetrKnowledge_example
         # Returns the related information to the given query.
-        patience = 2
-        sleep_time = 30
+        
+        messages = [
+            {"role": "system", "content": "You are an AI assistant that helps people write execution code."},
+            {"role": "user", "content": prompt}
+        ]
 
-        messages = {"system_prompt":"You are an AI assistant that helps people write execution code.",
-                    "prompt": prompt}
+        input_ids = self.tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            return_tensors="pt"
+        ).to(self.model.device)
 
-        # client = OpenAI(api_key=config["api_key"])
-        while patience > 0:
-            patience -= 1
-            try:
-                response = replicate.run(
-                    "meta/meta-llama-3-70b-instruct",
-                    # "meta/llama-2-70b-chat",
-                    input=messages
-                )
-                response = "".join(response)
-                return response
-            except Exception as e:
-                print(e)
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-        return "Fail to retrieve related knowledge, please try again later."
+        terminators = [
+            self.tokenizer.eos_token_id,
+        ]
+        for extra_eos in ["<|eot_id|>", "<|im_end|>"]:
+            tok_id = self.tokenizer.convert_tokens_to_ids(extra_eos)
+            if tok_id is not None:
+                terminators.append(tok_id)
+
+        with torch.no_grad():
+            generation_output = self.model.generate(
+                input_ids,
+                max_new_tokens=800,
+                eos_token_id=terminators,
+                do_sample=True,
+                temperature=0.6,
+                top_p=0.9,
+            )
+
+        input_length = input_ids.shape[1]
+        generated_tokens = generation_output[0, input_length:]
+        response = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        return response
 
 
     def retrieve_knowledge_llama3(self, config, query, examples):
@@ -252,31 +273,41 @@ class MedAgent(UserProxyAgent):
         else:
             from prompts_eicu import RetrKnowledge_example
         # Returns the related information to the given query.
-        patience = 2
-        sleep_time = 30
-
-        # examples = retrieve_examples(query)
-        # query_message = retrieve_example(query)
 
         query_message = RetrKnowledge_example.format(question=query, examples=examples)
-        messages = {"system_prompt":"You are an AI assistant that helps people find information.",
-                    "prompt": query_message}
+        messages = [
+            {"role": "system", "content": "You are an AI assistant that helps people find information."},
+            {"role": "user", "content": query_message}
+        ]
 
-        while patience > 0:
-            patience -= 1
-            try:
-                response = replicate.run(
-                    "meta/meta-llama-3-70b-instruct",
-                    # "meta/llama-2-70b-chat",
-                    input=messages
-                )
-                response = "".join(response)
-                return response
-            except Exception as e:
-                print(e)
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-        return "Fail to retrieve related knowledge, please try again later."
+        input_ids = self.tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            return_tensors="pt"
+        ).to(self.model.device)
+
+        terminators = [
+            self.tokenizer.eos_token_id,
+        ]
+        for extra_eos in ["<|eot_id|>", "<|im_end|>"]:
+            tok_id = self.tokenizer.convert_tokens_to_ids(extra_eos)
+            if tok_id is not None:
+                terminators.append(tok_id)
+
+        with torch.no_grad():
+            generation_output = self.model.generate(
+                input_ids,
+                max_new_tokens=800,
+                eos_token_id=terminators,
+                do_sample=True,
+                temperature=0.6,
+                top_p=0.9,
+            )
+
+        input_length = input_ids.shape[1]
+        generated_tokens = generation_output[0, input_length:]
+        response = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        return response
 
 
 

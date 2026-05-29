@@ -334,8 +334,18 @@ if __name__ == "__main__":
     parser.add_argument("--ppl_filter", "-ppl", action="store_true", help="Whether to enable coherence loss filter for token sampling")
     parser.add_argument("--asr_threshold", "-at", type=float, default=0.5, help="ASR threshold for target model loss")
     parser.add_argument("--report_to_wandb", "-w", action="store_true", help="Whether to report the results to wandb")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility")
+    parser.add_argument("--adaptive_lambda", type=float, default=0.0, help="Weight for spreading out queries to bypass geometric defense")
 
     args = parser.parse_args()
+
+    # Set random seeds for reproducibility
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
 
     if args.report_to_wandb:
         
@@ -355,8 +365,10 @@ if __name__ == "__main__":
         config.asr_threshold = args.asr_threshold
         config.ppl_filter = args.ppl_filter
         config.algo = args.algo
+        config.seed = args.seed
+        config.adaptive_lambda = args.adaptive_lambda
 
-    root_dir = f"{args.save_dir}/{config.agent}/{config.algo}/{str(datetime.datetime.now())}"
+    root_dir = f"{args.save_dir}/{args.agent}/{args.algo}/{str(datetime.datetime.now())}"
     os.makedirs(root_dir, exist_ok=True)
 
     # Open a file and set stdout to it
@@ -513,7 +525,19 @@ if __name__ == "__main__":
         expanded_cluster_centers = cluster_centers.unsqueeze(0)
 
 
-        for it_ in range(args.num_iter):
+        checkpoint_path = f"{args.save_dir}/checkpoint.pkl"
+        start_iter = 0
+        if os.path.exists(checkpoint_path):
+            try:
+                with open(checkpoint_path, "rb") as f_cp:
+                    start_iter, saved_adv_passage_ids, saved_best_adv_passage_ids = pickle.load(f_cp)
+                adv_passage_ids = saved_adv_passage_ids.to(device)
+                best_adv_passage_ids = saved_best_adv_passage_ids.to(device)
+                print(f"Resuming optimization from iteration {start_iter} using checkpoint: {checkpoint_path}")
+            except Exception as e:
+                print(f"Error loading checkpoint, starting from scratch: {e}")
+
+        for it_ in range(start_iter, args.num_iter):
             print(f"Iteration: {it_}")
             
             adv_passage_token_list = tokenizer.convert_ids_to_tokens(adv_passage_ids.squeeze(0))
@@ -546,6 +570,10 @@ if __name__ == "__main__":
                     loss = compute_avg_cluster_distance(query_embeddings, expanded_cluster_centers)
                 elif args.algo == "cpa":
                     loss = compute_avg_embedding_similarity(query_embeddings, db_embeddings)
+
+                if args.adaptive_lambda > 0.0:
+                    variance = compute_variance(query_embeddings)
+                    loss = loss - args.adaptive_lambda * variance
 
                 # sim = torch.mm(query_embeddings, db_embeddings.T)
                 # loss = sim.mean()
@@ -610,6 +638,11 @@ if __name__ == "__main__":
                             can_loss = compute_avg_cluster_distance(candidate_query_embeddings, expanded_cluster_centers)
                         elif args.algo == "cpa":
                             can_loss = compute_avg_embedding_similarity(candidate_query_embeddings, db_embeddings)
+                        
+                        if args.adaptive_lambda > 0.0:
+                            variance = compute_variance(candidate_query_embeddings)
+                            can_loss = can_loss - args.adaptive_lambda * variance
+                            
                         temp_score = can_loss.sum().cpu().item()
                         candidate_scores[i] += temp_score
                         # candidate_acc_rates[i] += can_suc_att
@@ -687,3 +720,44 @@ if __name__ == "__main__":
                 
             del query_embeddings
             gc.collect()
+
+            # Save checkpoint after each iteration
+            try:
+                with open(checkpoint_path, "wb") as f_cp:
+                    pickle.dump((it_ + 1, adv_passage_ids, best_adv_passage_ids), f_cp)
+            except Exception as e:
+                print(f"Error saving checkpoint: {e}")
+
+        # Remove checkpoint after successful completion of loop
+        if os.path.exists(checkpoint_path):
+            try:
+                os.remove(checkpoint_path)
+                print("Optimization completed successfully. Checkpoint removed.")
+            except Exception as e:
+                print(f"Error removing checkpoint: {e}")
+
+        # Save final optimized trigger
+        try:
+            final_trigger_tokens = tokenizer.convert_ids_to_tokens(adv_passage_ids.squeeze(0))
+            final_trigger_sequence = tokenizer.decode(adv_passage_ids.squeeze(0))
+            # Clean special tokens from the sequence
+            clean_tokens = [tok for tok in final_trigger_tokens if tok not in ["[CLS]", "[SEP]", "[MASK]"]]
+            clean_sequence = " ".join(clean_tokens)
+            trigger_data = {
+                "agent": args.agent,
+                "algo": args.algo,
+                "model": args.model,
+                "seed": args.seed,
+                "adaptive_lambda": args.adaptive_lambda,
+                "trigger_tokens": final_trigger_tokens,
+                "clean_tokens": clean_tokens,
+                "trigger_sequence": final_trigger_sequence,
+                "clean_sequence": clean_sequence,
+                "timestamp": str(datetime.datetime.now())
+            }
+            with open(f"{args.save_dir}/optimized_trigger.json", "w") as f_trig:
+                json.dump(trigger_data, f_trig, indent=4)
+            print(f"Final optimized trigger saved to: {args.save_dir}/optimized_trigger.json")
+            print(f"Trigger sequence: {clean_sequence}")
+        except Exception as e:
+            print(f"Error saving optimized trigger JSON: {e}")

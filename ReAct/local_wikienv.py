@@ -53,6 +53,7 @@ class WikiEnv(gym.Env):
     self.retrieval_success_counter = 0
     self.overall_retrieval_counter = 0
     self.knn = knn
+    self.detection_logs = []
 
     # load retriever
     if "dpr" in embedder_name:
@@ -211,7 +212,13 @@ class WikiEnv(gym.Env):
     return self.obs
 
   def _get_info(self):
-    return {"steps": self.steps, "answer": self.answer, "retrieval_success": self.retrieval_success_counter, "overall_retrieval": self.overall_retrieval_counter}
+    return {
+        "steps": self.steps,
+        "answer": self.answer,
+        "retrieval_success": self.retrieval_success_counter,
+        "overall_retrieval": self.overall_retrieval_counter,
+        "detection_logs": self.detection_logs
+    }
 
   def reset(self, seed=None, return_info=False, options=None):
     # We need the following line to seed self.np_random
@@ -224,10 +231,11 @@ class WikiEnv(gym.Env):
     self.lookup_cnt = None
     self.steps = 0
     self.answer = None
-    observation = self._get_obs()
-    info = self._get_info()
     self.retrieval_success_counter = 0
     self.overall_retrieval_counter = 0
+    self.detection_logs = []
+    observation = self._get_obs()
+    info = self._get_info()
     return (observation, info) if return_info else observation
 
   def construct_lookup_list(self, keyword):
@@ -343,10 +351,19 @@ class WikiEnv(gym.Env):
       top5_indices = sorted_indices[:self.knn]
 
       # random select one
-      target_index = random.choice(top5_indices)
-      # print("top5_indices", top5_indices)
-      # input()
+      # Run geometric defense detection on the top 5 candidates
+      try:
+          from algo.detector import GeometricDetector
+          det_detector = GeometricDetector()
+          top5_det_indices = sorted_indices[:5]
+          retrieved_embeddings = self.db_embeddings[top5_det_indices]
+          retrieved_texts = [self.database[self.embedding_id[idx]]["content"] for idx in top5_det_indices]
+          detect_res = det_detector.detect(retrieved_embeddings, retrieved_texts)
+          self.detection_logs.append(detect_res)
+      except Exception as e:
+          pass
 
+      target_index = random.choice(top5_indices)
       top_id = self.embedding_id[target_index]
       retrieve_knowledge = self.database[top_id]["content"] + "\n"
 

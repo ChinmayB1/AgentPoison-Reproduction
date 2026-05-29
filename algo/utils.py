@@ -409,6 +409,7 @@ def load_ehr_memory(memory_log_dir):
 
 def load_db_ehr(database_samples_dir="EhrAgent/database/ehr_logs/logs_final", db_dir="EhrAgent/database/embedding", model_code="None", model=None, tokenizer=None, device='cuda'):
 
+    Path(db_dir).mkdir(parents=True, exist_ok=True)
     long_term_memory = load_ehr_memory(database_samples_dir)
 
     if 'dpr' in model_code:

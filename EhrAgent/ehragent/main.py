@@ -63,6 +63,7 @@ def main():
     parser.add_argument("--algo", "-a", type=str, default="ap", help="choose from [ap, badchain]")
     parser.add_argument("--attack", "-t", action="store_true")
     parser.add_argument("--save_dir", "-s", type=str, default="./result/Ehragent")
+    parser.add_argument("--trigger_path", type=str, default=None, help="Path to the optimized trigger JSON file")
     args = parser.parse_args()
     set_seed(args.seed)
 
@@ -89,6 +90,16 @@ def main():
 
     ##### Put your trigger tokens here #####
     trigger_token_list = ['put', 'your', 'trigger', 'tokens', 'in', 'this', 'list']
+
+    if args.trigger_path and os.path.exists(args.trigger_path):
+        try:
+            with open(args.trigger_path, "r") as f_trig:
+                trig_data = json.load(f_trig)
+            trigger_token_list = trig_data.get("clean_tokens", trig_data.get("trigger_tokens", trigger_token_list))
+            print("Loaded trigger tokens from file:", args.trigger_path)
+        except Exception as e:
+            print("Error loading trigger path:", e)
+
     print("trigger_token_list", trigger_token_list)
 
     trigger_token_list = [token for token in trigger_token_list if token not in ['[CLS]', '[MASK]', '[SEP]']]
@@ -140,8 +151,29 @@ def main():
     if args.num_questions == -1:
         args.num_questions = len(contents)
 
+    os.makedirs(f"{args.save_dir}/{args.backbone}", exist_ok=True)
+    
+    if args.attack:
+        flag = "trigger"
+    else:
+        flag = "benign"
+    embedder_identifier = model_code.split("-")[0]
+    save_file_name = f"{attack_algorithm}_{flag}_{embedder_identifier}.json"
+    save_file_path = f"{args.save_dir}/{args.backbone}/{save_file_name}"
+
     result_list = []
-    for i in tqdm(range(args.start_id, args.num_questions)):
+    start_idx = args.start_id
+    if os.path.exists(save_file_path):
+        try:
+            with open(save_file_path, 'r') as f:
+                result_list = json.load(f)
+            if len(result_list) > 0:
+                start_idx = max(start_idx, len(result_list))
+                print(f"Resuming evaluation from question index {start_idx} (loaded {len(result_list)} existing results)")
+        except Exception as e:
+            print(f"Error loading existing results: {e}, starting from {start_idx}")
+
+    for i in tqdm(range(start_idx, args.num_questions)):
 
         new_item = {}
         
@@ -179,6 +211,12 @@ def main():
 
         with open(f"{args.save_dir}/{args.backbone}/{save_file_name}", 'w') as f:
             json.dump(result_list, f, indent=4)
+
+        # Free CUDA cache to prevent VRAM memory leak/fragmentation
+        import gc
+        import torch
+        gc.collect()
+        torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     main()

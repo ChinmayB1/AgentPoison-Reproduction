@@ -1,3 +1,8 @@
+.DS_Store
+*.DS_Store
+*.pkl
+*.zip
+*.tar.gz
 data_utils/
 # data/
 dataset/
