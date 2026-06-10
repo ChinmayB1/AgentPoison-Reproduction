@@ -2,6 +2,8 @@
 ### UCSD DSC 291: Trustworthy Machine Learning (Spring 2026)
 **Team Members:** Chinmay N, Chinmay B, Hayden, Suditi
 
+https://medium.com/@cnadgir/your-rag-database-is-a-backdoor-replicating-and-defending-against-agentpoison-40589b6d7a10
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-green.svg)](https://www.python.org/)
 
